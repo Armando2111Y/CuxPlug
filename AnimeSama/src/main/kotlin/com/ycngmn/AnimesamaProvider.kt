@@ -1,110 +1,91 @@
 package com.ycngmn
 
-import com.lagradost.cloudstream3.DubStatus
-import com.lagradost.cloudstream3.Episode
-import com.lagradost.cloudstream3.HomePageList
-import com.lagradost.cloudstream3.HomePageResponse
-import com.lagradost.cloudstream3.LoadResponse
-import com.lagradost.cloudstream3.MainAPI
-import com.lagradost.cloudstream3.MainPageRequest
-import com.lagradost.cloudstream3.SearchResponse
-import com.lagradost.cloudstream3.SeasonData
-import com.lagradost.cloudstream3.SubtitleFile
-import com.lagradost.cloudstream3.TvType
-import com.lagradost.cloudstream3.addEpisodes
-import com.lagradost.cloudstream3.addSeasonNames
-import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.mainPageOf
-import com.lagradost.cloudstream3.newAnimeLoadResponse
-import com.lagradost.cloudstream3.newAnimeSearchResponse
-import com.lagradost.cloudstream3.newEpisode
-import com.lagradost.cloudstream3.newHomePageResponse
+import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 import org.jsoup.nodes.Element
 
-
 class AnimesamaProvider : MainAPI() {
 
-    override var mainUrl = "https://anime-sama.eu"
+    override var mainUrl = "https://anime-sama.si"
     override var name = "Anime-sama"
-    override val supportedTypes = setOf(
-        TvType.Anime,
-        TvType.AnimeMovie
-    )
-
+    override val supportedTypes = setOf(TvType.Anime)
     override var lang = "fr"
-    override val hasMainPage = true
-    override val hasQuickSearch = true
 
-    override val mainPage = mainPageOf(
-        "1" to "Derniers épisodes ajoutés",
-        "2" to "Derniers contenus sortis",
-        "3" to "Les classiques",
-        "4" to "Découvrez des pépites",
-    )
+    // On désactive ce qui est cassé
+    override val hasMainPage = false
+    override val hasQuickSearch = false
 
-    override suspend fun getMainPage(
-        page: Int,
-        request: MainPageRequest
-    ): HomePageResponse {
-        val doc = app.get(mainUrl, cacheTime = 60).document
+    // -------- UTILS --------
 
-        val query = when (request.data) {
-            "1" -> "#containerAjoutsAnimes a"
-            "2" -> "#containerSorties a"
-            "3" -> "#containerClassiques a"
-            "4" -> "#containerPepites a"
-            else -> ""
-        }
-        val home = doc.select(query).mapNotNull { toResult(it) }
+    private fun Element.toSearchResult(): SearchResponse? {
+        val link = this.attr("href")
+        val title = this.text()
+        if (link.isBlank() || title.isBlank()) return null
 
-        return newHomePageResponse(
-            HomePageList(request.name, home, isHorizontalImages = true),
-            false
+        return newAnimeSearchResponse(
+            title,
+            link,
+            TvType.Anime
         )
     }
 
+    // -------- LOAD ANIME --------
 
-    private fun toResult(post: Element): SearchResponse {
-        var title = post.selectFirst("h1")?.text() ?: ""
-        if (title == "")
-            title = post.selectFirst("h3")?.text() ?: ""
-        var url = post.selectFirst("a")?.attr("href") ?: ""
-        url = if (url.split("/").size > 5) url.split("/").take(5).joinToString("/")
-        else url
-        return newAnimeSearchResponse(title, url, TvType.Anime) {
-            this.posterUrl = post.selectFirst("img")
-                ?.attr("src")
+    override suspend fun load(url: String): LoadResponse {
+        val doc = app.get(url).document
 
+        val title = doc.selectFirst("h1, h2, h3")?.text()
+            ?: throw ErrorLoadingException("Titre introuvable")
+
+        val poster = doc.selectFirst("img")?.attr("src")
+
+        val episodes = mutableListOf<Episode>()
+
+        // Anime-sama.si → liens vers pages épisodes
+        doc.select("a[href*=\"episode\"]").forEachIndexed { index, el ->
+            val epUrl = el.attr("href")
+            episodes.add(
+                newEpisode(epUrl) {
+                    name = "Épisode ${index + 1}"
+                    episode = index + 1
+                }
+            )
+        }
+
+        return newAnimeLoadResponse(title, url, TvType.Anime) {
+            posterUrl = poster
+            addEpisodes(DubStatus.Subbed, episodes)
         }
     }
 
-    override suspend fun search(query: String): List<SearchResponse> {
-        val doc = app.post(
-            "$mainUrl/template-php/defaut/fetch.php",
-            data = mapOf("query" to query),
-            cacheTime = 60
-        ).document
-        return doc.select("a").mapNotNull { toResult(it) }
+    // -------- LOAD LINKS --------
+
+    override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+
+        val doc = app.get(data).document
+
+        // Anime-sama.si → iframes
+        doc.select("iframe").forEach { iframe ->
+            val src = iframe.attr("src")
+            if (src.startsWith("http")) {
+                loadExtractor(
+                    src,
+                    data,
+                    subtitleCallback,
+                    callback
+                )
+            }
+        }
+
+        return true
     }
-
-    override suspend fun load(url: String): LoadResponse {
-
-
-        val doc = app.get(url, cacheTime = 60).document
-        val title = doc.selectFirst("h4#titreOeuvre")?.text()
-            ?: throw NotImplementedError("Unable to find title")
-        val otherTitles =
-            doc.selectFirst("#titreAlter")?.text()?.split(",")?.map { it.trim() } ?: listOf()
-        val image = doc.selectFirst("#coverOeuvre")?.attr("src")
-        val tags =
-            doc.selectFirst("a.text-sm.text-gray-300.mt-2")?.text()?.split(",")?.map { it.trim() }
-                ?: listOf()
-        val synopsis = doc.selectFirst("p.text-sm.text-gray-400.mt-2")?.text() ?: ""
-
-        // Pair of ( seasonName : href )
-        val rawSeasonData =
+}        val rawSeasonData =
             doc.selectFirst("div.flex.flex-wrap.overflow-y-hidden.justify-start.bg-slate-900.bg-opacity-70.rounded.mt-2.h-auto script")
                 ?.toString() ?: ""
         val extractedData = rawSeasonData.split("/*", "*/")[2]
